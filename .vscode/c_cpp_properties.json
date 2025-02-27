@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "compilerPath": "C:/msys64/ucrt64/bin/g++.exe",
+            "compilerArgs": [
+                "g++ -std=c++17 -o server server.cpp -lssl -lcrypto",
+                "g++ -std=c++17 -o client client.cpp -lssl -lcrypto"
+            ]
+        }
+    ],
+    "version": 4
+}
