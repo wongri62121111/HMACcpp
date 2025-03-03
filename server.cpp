@@ -1,116 +1,85 @@
-#include <openssl/hmac.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <iostream>
-#include <vector>
+#include <winsock2.h>
 #include <chrono>
+#include "hmac_sha256.h"
 
+#pragma comment(lib, "ws2_32.lib")
 
-using namespace std;
+#define PORT 8080
+#define BUFFER_SIZE 1024
 
-#define PORT 5001
-#define BUFFER_SIZE 4096
+int main() {
+    WSADATA wsaData;
+    SOCKET serverSocket, clientSocket;
+    struct sockaddr_in serverAddr, clientAddr;
+    int clientAddrLen = sizeof(clientAddr);
+    char buffer[BUFFER_SIZE] = {0};
+    const char* key = "secret_key";
 
-struct HMACPayload {
-    std::vector<uint8_t> data;
-    std::vector<uint8_t> hmac;
-};
-
-std::vector<uint8_t> generateHMAC(const std::vector<uint8_t>& data, const std::string& key) {
-    std::vector<uint8_t> hmac(EVP_MAX_MD_SIZE);
-    unsigned int hmac_len;
-    HMAC(EVP_sha256(), key.data(), key.size(), data.data(), data.size(), hmac.data(), &hmac_len);
-    hmac.resize(hmac_len);
-    return hmac;
-}
-
-bool verifyHMAC(const HMACPayload& payload, const std::string& key) {
-    auto computed_hmac = generateHMAC(payload.data, key);
-    return computed_hmac == payload.hmac;
-}
-
-void startServer() {
-    int server_fd, client_fd;
-    struct sockaddr_in address;
-    int opt = 1;
-    int addrlen = sizeof(address);
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed." << std::endl;
+        return 1;
+    }
 
     // Create socket
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
-        exit(EXIT_FAILURE);
+    if ((serverSocket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        std::cerr << "Socket creation failed." << std::endl;
+        WSACleanup();
+        return 1;
     }
-
-    // Set socket options
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-        perror("Setsockopt failed");
-        exit(EXIT_FAILURE);
-    }
-
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
 
     // Bind socket
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
-        exit(EXIT_FAILURE);
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(PORT);
+    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        std::cerr << "Bind failed." << std::endl;
+        closesocket(serverSocket);
+        WSACleanup();
+        return 1;
     }
 
     // Listen for connections
-    if (listen(server_fd, 3) < 0) {
-        perror("Listen failed");
-        exit(EXIT_FAILURE);
+    if (listen(serverSocket, 1) == SOCKET_ERROR) {
+        std::cerr << "Listen failed." << std::endl;
+        closesocket(serverSocket);
+        WSACleanup();
+        return 1;
     }
 
-    std::cout << "Server listening on port " << PORT << std::endl;
+    std::cout << "Server listening on port " << PORT << "..." << std::endl;
 
-    // Accept connection
-    if ((client_fd = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
-        perror("Accept failed");
-        exit(EXIT_FAILURE);
+    // Accept client connection
+    if ((clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientAddrLen)) == INVALID_SOCKET) {
+        std::cerr << "Accept failed." << std::endl;
+        closesocket(serverSocket);
+        WSACleanup();
+        return 1;
     }
 
-    std::cout << "Client connected" << std::endl;
+    // Receive HMAC payload
+    auto start = std::chrono::high_resolution_clock::now();
+    int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
 
-    HMACPayload payload;
-    std::vector<uint8_t> buffer(BUFFER_SIZE);
-    ssize_t bytes_read;
-    size_t total_received = 0;
+    if (bytesReceived > 0) {
+        std::cout << "Received HMAC payload: " << buffer << std::endl;
+        std::cout << "Time to receive: " << elapsed.count() << " seconds" << std::endl;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+        // Verify HMAC
+        uint8_t hmac[32];
+        hmac_sha256(key, strlen(key), (uint8_t*)buffer, bytesReceived, hmac);
 
-    // Receive data
-    while ((bytes_read = recv(client_fd, buffer.data(), buffer.size(), 0)) > 0) {
-        payload.data.insert(payload.data.end(), buffer.begin(), buffer.begin() + bytes_read);
-        total_received += bytes_read;
+        // Send response
+        const char* response = "HMAC verified!";
+        send(clientSocket, response, strlen(response), 0);
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end_time - start_time;
-    double throughput = total_received / elapsed.count();
-
-    std::cout << "Received " << total_received << " bytes in " << elapsed.count() << " seconds." << std::endl;
-    std::cout << "Throughput: " << throughput / 1024 << " KB/s" << std::endl;
-
-    // Verify HMAC
-    std::string key = "secret_key";
-    if (verifyHMAC(payload, key)) {
-        std::cout << "HMAC verification succeeded" << std::endl;
-    } else {
-        std::cout << "HMAC verification failed" << std::endl;
-    }
-
-    // Send acknowledgment
-    const char* ack = "ACK";
-    send(client_fd, ack, strlen(ack), 0);
-
-    close(client_fd);
-    close(server_fd);
-}
-
-int main() {
-    startServer();
+    // Cleanup
+    closesocket(clientSocket);
+    closesocket(serverSocket);
+    WSACleanup();
     return 0;
 }

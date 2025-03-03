@@ -1,89 +1,64 @@
-#include <openssl/hmac.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <iostream>
-#include <vector>
+#include <winsock2.h>
 #include <chrono>
+#include "hmac_sha256.h"
 
-//make sure to set up mingw and g++ and gcc for this project
+#pragma comment(lib, "ws2_32.lib")
 
-using namespace std;
-#define PORT 5001
-#define SERVER_IP "127.0.0.1"
+#define PORT 8080
+#define BUFFER_SIZE 1024
 
-struct HMACPayload {
-    std::vector<uint8_t> data;
-    std::vector<uint8_t> hmac;
-};
+int main() {
+    WSADATA wsaData;
+    SOCKET clientSocket;
+    struct sockaddr_in serverAddr;
+    char buffer[BUFFER_SIZE] = {0};
+    const char* key = "secret_key";
+    const char* message = "Hello, server!";
 
-std::vector<uint8_t> generateHMAC(const std::vector<uint8_t>& data, const std::string& key) {
-    std::vector<uint8_t> hmac(EVP_MAX_MD_SIZE);
-    unsigned int hmac_len;
-    HMAC(EVP_sha256(), key.data(), key.size(), data.data(), data.size(), hmac.data(), &hmac_len);
-    hmac.resize(hmac_len);
-    return hmac;
-}
-
-void runClient() {
-    int sock = 0;
-    struct sockaddr_in serv_addr;
-
-    // Create socket
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        std::cerr << "Socket creation error" << std::endl;
-        return;
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed." << std::endl;
+        return 1;
     }
 
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
-
-    // Convert IP address
-    if (inet_pton(AF_INET, SERVER_IP, &serv_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid address/ Address not supported" << std::endl;
-        return;
+    // Create socket
+    if ((clientSocket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        std::cerr << "Socket creation failed." << std::endl;
+        WSACleanup();
+        return 1;
     }
 
     // Connect to server
-    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        std::cerr << "Connection failed" << std::endl;
-        return;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        std::cerr << "Connection failed." << std::endl;
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
     }
 
-    std::cout << "Connected to server" << std::endl;
+    // Compute HMAC
+    uint8_t hmac[32];
+    hmac_sha256(key, strlen(key), (uint8_t*)message, strlen(message), hmac);
 
-    // Prepare HMAC payload
-    std::string key = "secret_key";
-    std::vector<uint8_t> data(1024 * 1024, 'a'); // 1 MB of data
-    HMACPayload payload;
-    payload.data = data;
-    payload.hmac = generateHMAC(data, key);
+    // Send HMAC payload
+    auto start = std::chrono::high_resolution_clock::now();
+    send(clientSocket, message, strlen(message), 0);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "Time to send: " << elapsed.count() << " seconds" << std::endl;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    // Receive response
+    int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+    if (bytesReceived > 0) {
+        std::cout << "Server response: " << buffer << std::endl;
+    }
 
-    // Send payload
-    send(sock, payload.data.data(), payload.data.size(), 0);
-    send(sock, payload.hmac.data(), payload.hmac.size(), 0);
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end_time - start_time;
-    double throughput = payload.data.size() / elapsed.count();
-
-    std::cout << "Sent " << payload.data.size() << " bytes in " << elapsed.count() << " seconds." << std::endl;
-    std::cout << "Throughput: " << throughput / 1024 << " KB/s" << std::endl;
-
-    // Shutdown sending side
-    shutdown(sock, SHUT_WR);
-
-    // Wait for acknowledgment
-    char ack[1024] = {0};
-    recv(sock, ack, sizeof(ack), 0);
-    std::cout << "Received acknowledgment: " << ack << std::endl;
-
-    close(sock);
-}
-
-int main() {
-    runClient();
+    // Cleanup
+    closesocket(clientSocket);
+    WSACleanup();
     return 0;
 }
